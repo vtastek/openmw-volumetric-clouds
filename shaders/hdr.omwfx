@@ -1,0 +1,175 @@
+uniform_float neutral_point {
+    default = 0.18;
+    min = 0.1;
+    max = 1.0;
+    step = 0.005;
+    description = "Neytral point";
+}
+
+uniform_float sensitivity {
+    default = 0.11;
+    min = 0.0;
+    max = 1.0;
+    step = 0.01;
+    description = "Sensitivity";
+}
+
+uniform_float max_exposure {
+    default = 6.2;
+    min = 0.1;
+    max = 10.0;
+    step = 0.1;
+    description = "Maximum exposure";
+}
+
+uniform_float contrast {
+    default = 1.0;
+    min = 0.0;
+    max = 1.0;
+    step = 0.1;
+    description = "Contrast";
+}
+
+fragment toneagx {
+    // #define EXPOSURE_METER
+
+    varying vec2 omw_TexCoord;
+
+    vec4 HDR = vec4(omw_GetEyeAdaptation());
+    float exposure = clamp(mix(1.0, neutral_point / HDR.x, sensitivity), 0.5, max_exposure) * sqrt(HDR.y/HDR.x);
+    float scotopic = 0.5 * clamp(exposure / max_exposure - 0.66666, 0.0, 1.0);
+	
+	#define CMAX 1.6e+6f
+	// 0: Default, 1: Golden, 2: Punchy
+	#define AGX_LOOK 2
+
+	// AgX
+	// ->
+
+	// Mean error^2: 3.6705141e-06
+	vec3 agxDefaultContrastApprox(vec3 x) {
+	  vec3 x2 = x * x;
+	  vec3 x4 = x2 * x2;
+	  
+	  return + 15.5     * x4 * x2
+			 - 40.14    * x4 * x
+			 + 31.96    * x4
+			 - 6.868    * x2 * x
+			 + 0.4298   * x2
+			 + 0.1191   * x
+			 - 0.00232;
+	}
+
+	vec3 agx(vec3 val) {
+	  const mat3 agx_mat = mat3(
+		0.842479062253094, 0.0423282422610123, 0.0423756549057051,
+		0.0784335999999992,  0.878468636469772,  0.0784336,
+		0.0792237451477643, 0.0791661274605434, 0.879142973793104);
+		
+	  const float min_ev = -12.47393f;
+	  const float max_ev = 4.026069f;
+
+	  // Input transform
+	  val = agx_mat * val;
+	  
+	  // Log2 space encoding
+	  val = clamp(log2(val), min_ev, max_ev);
+	  val = (val - min_ev) / (max_ev - min_ev);
+	  
+	  // Apply sigmoid function approximation
+	  val = agxDefaultContrastApprox(val);
+
+	  return val;
+	}
+
+	vec3 agxEotf(vec3 val) {
+	  const mat3 agx_mat_inv = mat3(
+		1.19687900512017, -0.0528968517574562, -0.0529716355144438,
+		-0.0980208811401368, 1.15190312990417, -0.0980434501171241,
+		-0.0990297440797205, -0.0989611768448433, 1.15107367264116);
+		
+	  // Undo input transform
+	  val = agx_mat_inv * val;
+	  
+	  // sRGB IEC 61966-2-1 2.2 Exponent Reference EOTF Display
+	  //val = pow(val, vec3(2.2));
+
+	  return val;
+	}
+
+	vec3 agxLook(vec3 val) {
+	  const vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+	  float luma = dot(val, lw);
+	  
+	  // Default
+	  vec3 offset = vec3(0.0);
+	  vec3 slope = vec3(1.0);
+	  vec3 power = vec3(1.0);
+	  float sat = 1.0;
+	 
+	#if AGX_LOOK == 1
+	  // Golden
+	  slope = vec3(1.0, 0.9, 0.5);
+	  power = 0.8;
+	  sat = 0.8;
+	#elif AGX_LOOK == 2
+	  // Punchy
+	  slope = vec3(1.0);
+	  power = vec3(1.35);
+	  sat = 1.4;
+	#endif
+	  
+	  // ASC CDL
+	  val = pow(val * slope + offset, vec3(power));
+	  return luma + sat * (val - luma);
+	}
+
+
+
+    void main()
+    {
+        vec3 c = omw_GetLastShader(omw_TexCoord).rgb;
+
+        // Increase dynamic range in low light
+        vec3 g = exposure * c + (1.0 - exposure) * pow(c, vec3(4.0));
+
+        // Film response toe/knee contrast
+        // 0.727408x^4 - 2.05477x^3 + 1.63747x^2 + 0.712032x
+        //g = (((0.727408 * g + -2.05477) * g + 1.63747) * g + 0.712032) * g;
+		
+		vec3 col = agx(min(vec3(CMAX), max(vec3(0.0),0.005 + 10* pow(g, vec3(2.2)))));
+		col = agxLook(col);
+		col = agxEotf(col);
+		
+		g = col;
+
+        // Correct for over-saturation when exposure is high (scotopic vision)
+        g = mix(g, vec3(dot(g, vec3(0.33333))), vec3(scotopic));
+
+        // Exposure meters
+        #ifdef EXPOSURE_METER
+
+        // HDR lumi meter
+        if(omw_TexCoord.x < HDR.x && omw_TexCoord.y > 0.95) g = mix(g, vec3(1.0), vec3(0.2));
+        if(abs(omw_TexCoord.x - neutral_point) < 0.004 && omw_TexCoord.y > 0.95) g = mix(g, vec3(1.0), vec3(0.14));
+        // Exposure multiplier meter
+        if(omw_TexCoord.x < exposure/max_exposure && omw_TexCoord.y > 0.9 && omw_TexCoord.y < 0.94) g = mix(g, vec3(1.0), vec3(0.2));
+        if(abs(omw_TexCoord.x - 1.0/max_exposure) < 0.004 && omw_TexCoord.y > 0.9 && omw_TexCoord.y < 0.94) g = mix(g, vec3(1.0), vec3(0.14));
+
+        #endif
+		
+		
+		vec3 contrasted = g*g*g*(g*(g*6.0 - 13.2) + 8.2);
+		g.rgb = mix(g.rgb, contrasted, 0.5 * contrast);
+
+        omw_FragColor = vec4(clamp(g, 0.0, 1.0), 1.0);
+    }
+}
+
+technique {
+    passes = toneagx;
+    description = "FAKE HDR AGX";
+    author = "Hrnchamd, Dexter";
+    version = "0.1";
+    hdr = true;
+}
