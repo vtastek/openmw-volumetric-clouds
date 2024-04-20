@@ -437,7 +437,7 @@ fragment main(rt1=Depth_32) {
     // Replace this function with the one below it if your GPU can't handle bitwise ops
     float hash_one(int q) {
         int n = ((M3 * q) ^ M2) * M1;
-        return float(n) * (1.0 / float(0xffffffffu));
+        return float(n) * (1.0 / float(0xffffffff));
     }
 
     float noise_2d(vec2 pos) {
